@@ -40,6 +40,7 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         username TEXT,
         vpn_uuid TEXT,
+        sub_id TEXT,
         email TEXT,
         expiry_date INTEGER
     )''')
@@ -221,7 +222,7 @@ def show_instructions_menu(chat_id, message_id):
 def show_platform_guide(chat_id, platform, message_id):
     guides = {
         'ios': {
-            'link': 'https://apps.apple.com/us/app/happ-proxy-utility/id6443956488',
+            'link': 'https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973',
             'text': (
                 "🍏 **Подписка Happ (iOS)**\n\n"
                 "1. Скачайте Happ.\n"
@@ -234,7 +235,7 @@ def show_platform_guide(chat_id, platform, message_id):
             )
         },
         'android': {
-            'link': 'https://play.google.com/store/apps/details?id=com.v2ray.ang',
+            'link': 'https://play.google.com/store/apps/details?id=com.happproxy',
             'text': (
                 "🤖 **Подписка Happ/v2rayNG (Android)**\n\n"
                 "1. Скачайте приложение.\n"
@@ -248,7 +249,7 @@ def show_platform_guide(chat_id, platform, message_id):
         # Для Windows и Mac логика похожая: "Subscription" -> "Add" -> "Update".
         # ... (остальные можно оставить похожими или обновить под "Подписку")
         'windows': {
-            'link': 'https://github.com/hiddify/hiddify-next/releases/latest',
+            'link': 'https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe',
             'text': (
                 "💻 **Подписка на Windows**\n\n"
                 "1. Скачайте приложение.\n"
@@ -259,7 +260,7 @@ def show_platform_guide(chat_id, platform, message_id):
             )
         },
         'macos': {
-            'link': 'https://apps.apple.com/us/app/happ-proxy-utility/id6443956488',
+            'link': 'https://github.com/Happ-proxy/happ-desktop/releases/latest/download/Happ.macOS.universal.dmg',
             'text': (
                 "🍎 **Подписка Happ (macOS)**\n\n"
                 "1. Скачайте Happ.\n"
@@ -298,11 +299,11 @@ def admin_give(message):
     if message.chat.id != ADMIN_ID: return
     try:
         user_id = int(message.text.split()[1])
-        # Генерируем и UUID, и SUB_ID
         new_uuid = str(uuid.uuid4())
-        new_sub_id = secrets.token_hex(8) # Генерируем случайную строку для подписки
+        new_sub_id = secrets.token_hex(8)
         email = f"tg_{user_id}"
         
+        # Пробуем добавить в панель
         if add_client(new_uuid, new_sub_id, email):
             conn = sqlite3.connect('shop.db')
             c = conn.cursor()
@@ -310,17 +311,23 @@ def admin_give(message):
             u = c.fetchone()
             uname = u[0] if u else "Unknown"
             
-            # Сохраняем sub_id тоже!
-            c.execute("INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, sub_id, email) VALUES (?, ?, ?, ?, ?)", 
-                      (user_id, uname, new_uuid, new_sub_id, email))
+            # ВАЖНО: Тут теперь правильный запрос с полем sub_id
+            c.execute("""
+                INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, sub_id, email) 
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, uname, new_uuid, new_sub_id, email))
             conn.commit()
             conn.close()
             
             link = generate_sub_link(new_sub_id)
-            bot.send_message(user_id, f"🎉 **Подписка выдана!**\n🔗: `{link}`", parse_mode='Markdown')
+            bot.send_message(user_id, f"🎉 **Подписка выдана админом!**\n🔗: `{link}`", parse_mode='Markdown')
             bot.send_message(ADMIN_ID, f"✅ Выдано для {user_id}")
+        else:
+            # Если 3x-ui не ответил или вернул false - сообщаем админу
+            bot.send_message(ADMIN_ID, "❌ Ошибка: Панель 3x-ui не дала создать клиента. Проверь логи панели.")
+            
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"Ошибка: {e}")
+        bot.send_message(ADMIN_ID, f"Ошибка скрипта: {e}")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
