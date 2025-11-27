@@ -4,13 +4,14 @@ import requests
 import json
 import uuid
 import sqlite3
+import time
 import os
 from dotenv import load_dotenv
+from yoomoney import Quickpay, Client
 
-# Загружаем настройки из файла .env
+# === ЗАГРУЗКА НАСТРОЕК ===
 load_dotenv()
 
-# Получаем переменные
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
 XUI_HOST = os.getenv('XUI_HOST')
@@ -19,6 +20,9 @@ XUI_PASSWORD = os.getenv('XUI_PASSWORD')
 INBOUND_ID = int(os.getenv('INBOUND_ID'))
 SERVER_IP = os.getenv('SERVER_IP')
 VLESS_PORT = os.getenv('VLESS_PORT')
+
+YM_TOKEN = os.getenv('YOOMONEY_TOKEN')
+YM_WALLET = os.getenv('YOOMONEY_WALLET')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 session = requests.Session()
@@ -31,52 +35,79 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         username TEXT,
         vpn_uuid TEXT,
-        email TEXT
+        email TEXT,
+        expiry_date INTEGER
     )''')
     conn.commit()
     conn.close()
 
-# === API 3X-UI ===
+# === ИНТЕГРАЦИЯ С 3X-UI ===
 def login_to_xui():
     try:
         session.post(f"{XUI_HOST}/login", data={"username": XUI_USERNAME, "password": XUI_PASSWORD})
-    except Exception as e:
-        print(f"Ошибка входа в панель: {e}")
+    except:
+        pass
 
-def add_client(uuid_str, email):
+def add_client(uuid_str, email, days=30):
     login_to_xui()
-    # Настройки клиента. ВАЖНО: flow нужен только для Reality/Vision.
-    # Если у тебя простой VLESS, flow оставь пустым: "flow": ""
+    # Вычисляем дату окончания (в миллисекундах)
+    expire_time = int(time.time() * 1000) + (days * 24 * 60 * 60 * 1000)
+    
     settings = {
         "clients": [
             {
                 "id": uuid_str,
                 "email": email,
                 "enable": True,
-                "flow": "xtls-rprx-vision" 
+                "flow": "xtls-rprx-vision", # Если не Vision, оставь пустым ""
+                "expiryTime": expire_time
             }
         ]
     }
     
-    payload = {
-        "id": INBOUND_ID,
-        "settings": json.dumps(settings)
-    }
-    
+    payload = {"id": INBOUND_ID, "settings": json.dumps(settings)}
     headers = {'Content-Type': 'application/json'}
+    
     try:
-        response = session.post(f"{XUI_HOST}/panel/api/inbounds/addClient", json=payload, headers=headers)
-        return response.json().get('success', False)
+        resp = session.post(f"{XUI_HOST}/panel/api/inbounds/addClient", json=payload, headers=headers)
+        return resp.json().get('success', False)
     except Exception as e:
-        print(f"Ошибка API: {e}")
+        print(f"Ошибка X-UI: {e}")
         return False
 
 def generate_link(uuid_str, email):
-    # ⚠️ СЮДА НУЖНО ВСТАВИТЬ ТВОЙ ШАБЛОН ССЫЛКИ
-    # Скопируй реальную ссылку из панели и замени UUID и IP на переменные
-    return f"vless://{uuid_str}@{SERVER_IP}:{VLESS_PORT}?type=tcp&security=reality&fp=chrome&pbk=CHANGE_ME&sni=google.com&sid=CHANGE_ME&spx=%2F#{email}"
+    # ⚠️ ВСТАВЬ СЮДА СВОЙ ШАБЛОН ССЫЛКИ ИЗ ПАНЕЛИ
+    # Не забудь заменить PBK, SID и SNI на свои реальные значения!
+    return f"vless://{uuid_str}@{SERVER_IP}:{VLESS_PORT}?type=tcp&security=reality&pbk=cGL0Zsjx2OkWTK5GLbcbyCFZ3rs5DgN0phuWhHlUawQ&fp=chrome&sni=google.com&sid=0c&spx=%2F#%F0%9F%87%AB%F0%9F%87%AE%20Finland-1%20%D0%BC%D0%B5%D1%81%D1%8F%D1%86&flow=xtls-rprx-vision#{email}"
 
-# === БОТ ===
+# === ЮМАНИ ПЛАТЕЖИ ===
+def create_payment(user_id, price):
+    # Метка платежа: ID юзера + время, чтобы было уникально
+    label = f"vpn_{user_id}_{int(time.time())}"
+    
+    quickpay = Quickpay(
+            receiver=YM_WALLET,
+            quickpay_form="shop",
+            targets="VPN на 1 месяц",
+            paymentType="SB", # SB = Банковская карта
+            sum=price,
+            label=label
+            )
+    return quickpay.base_url, label
+
+def check_payment(label):
+    try:
+        client = Client(YM_TOKEN)
+        # Ищем в истории входящих платежей нашу метку (label)
+        history = client.operation_history(label=label)
+        for op in history.operations:
+            if op.status == 'success':
+                return True
+    except Exception as e:
+        print(f"Ошибка проверки Юмани: {e}")
+    return False
+
+# === ЛОГИКА БОТА ===
 @bot.message_handler(commands=['start'])
 def start(message):
     init_db()
@@ -88,68 +119,68 @@ def start(message):
     conn.close()
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🛒 Купить VPN", "👤 Мой ключ")
+    markup.add("🛒 Купить подписку (100р)", "👤 Мой ключ")
     
-    bot.send_message(message.chat.id, "Привет! Это TS VPN бот.", reply_markup=markup)
+    bot.send_message(message.chat.id, "Привет! Это TS VPN 🚀\nЖми кнопку ниже.", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text == "🛒 Купить VPN")
+@bot.message_handler(func=lambda m: m.text == "🛒 Купить подписку (100р)")
 def buy(message):
+    price = 100 # Цена в рублях
+    # 1. Создаем ссылку
+    pay_url, label = create_payment(message.chat.id, price)
+    
     markup = types.InlineKeyboardMarkup()
-    # Кнопка сразу ведет к оплате или проверке
-    btn = types.InlineKeyboardButton("Оплатить 150р", callback_data="pay_manual")
-    markup.add(btn)
-    bot.send_message(message.chat.id, "Тариф: Месяц подписки\nЦена: 100 руб.", reply_markup=markup)
+    markup.add(types.InlineKeyboardButton("💳 Оплатить картой (или СБП)", url=pay_url))
+    # В кнопку проверки зашиваем метку (label)
+    markup.add(types.InlineKeyboardButton("🔄 Я оплатил", callback_data=f"check_{label}"))
+    
+    bot.send_message(message.chat.id, 
+                     f"Счет создан!\nЦена: {price} руб.\n\nНажми кнопку, оплати картой (или СБП), затем нажми 'Я оплатил'.", 
+                     reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data == "pay_manual")
-def manual_pay(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    bot.send_message(call.message.chat.id, 
-                     "💳 Переведи 100р на карту: `0000 0000 0000 0000`\n\nКак переведешь - жми кнопку.", 
-                     parse_mode='Markdown',
-                     reply_markup=types.InlineKeyboardMarkup().add(
-                         types.InlineKeyboardButton("✅ Я оплатил", callback_data=f"confirm_{call.from_user.id}")
-                     ))
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_"))
-def user_confirmed(call):
-    # Уведомляем пользователя
-    bot.edit_message_text("⏳ Заявка отправлена админу...", call.message.chat.id, call.message.message_id)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
+def check_handler(call):
+    label = call.data.split("_")[1]
     
-    # Кнопка для админа
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("✅ Выдать доступ", callback_data=f"admin_yes_{call.from_user.id}"))
+    bot.answer_callback_query(call.id, "Проверяю оплату...")
     
-    # === ИСПРАВЛЕНИЕ НИЖЕ ===
-    # Используем HTML, чтобы ники с символом "_" не ломали бота
-    # И добавим проверку, если у юзера нет никнейма
-    username = call.from_user.username if call.from_user.username else "Без никнейма"
-    
-    bot.send_message(ADMIN_ID, 
-                     f"💰 <b>Новая оплата!</b>\nОт: @{username}", 
-                     reply_markup=markup, 
-                     parse_mode='HTML') # <--- Заменили Markdown на HTML
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_yes_"))
-def admin_approve(call):
-    client_id = call.data.split("_")[2]
-    
-    # Генерация
-    new_uuid = str(uuid.uuid4())
-    email = f"tg_{client_id}"
-    
-    if add_client(new_uuid, email):
-        # Сохраняем в БД
-        conn = sqlite3.connect('shop.db')
-        c = conn.cursor()
-        c.execute("UPDATE users SET vpn_uuid = ?, email = ? WHERE user_id = ?", (new_uuid, email, client_id))
-        conn.commit()
+    if check_payment(label):
+        # === ОПЛАТА УСПЕШНА ===
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, "✅ Оплата получена! Настраиваю сервер...")
         
-        # Отправляем
-        link = generate_link(new_uuid, email)
-        bot.send_message(client_id, f"✅ Оплата принята!\nТвой ключ:\n`{link}`", parse_mode='Markdown')
-        bot.send_message(ADMIN_ID, "✅ Клиент создан.")
+        # 1. Данные для ключа
+        new_uuid = str(uuid.uuid4())
+        email = f"tg_{call.from_user.id}"
+        
+        # 2. Создаем в панели
+        if add_client(new_uuid, email, days=30):
+            # 3. Сохраняем в БД
+            conn = sqlite3.connect('shop.db')
+            c = conn.cursor()
+            c.execute("UPDATE users SET vpn_uuid = ?, email = ? WHERE user_id = ?", 
+                      (new_uuid, email, call.from_user.id))
+            conn.commit()
+            conn.close()
+            
+            # 4. Отдаем клиенту
+            link = generate_link(new_uuid, email)
+            bot.send_message(call.message.chat.id, 
+                             f"🎉 **Подписка активирована!**\n\nТвоя ссылка:\n`{link}`\n\n(Нажми чтобы скопировать)", 
+                             parse_mode='Markdown')
+            
+            # Уведомляем админа
+            try:
+                bot.send_message(ADMIN_ID, f"💰 **Продажа!**\nЮзер: @{call.from_user.username}\nСумма: 150р", parse_mode='HTML')
+            except: pass
+            
+        else:
+            bot.send_message(call.message.chat.id, "❌ Деньги пришли, но возникла ошибка при создании ключа. Перешлите это сообщение админу.")
+            bot.send_message(ADMIN_ID, f"❌ Ошибка выдачи ключа для {call.from_user.username}. Деньги получены!")
+            
     else:
-        bot.send_message(ADMIN_ID, "❌ Ошибка создания клиента в панели.")
+        # === ОПЛАТА НЕ НАЙДЕНА ===
+        bot.send_message(call.message.chat.id, "❌ Платеж пока не видим. Если оплатили только что - подождите минуту и нажмите кнопку снова.")
 
 @bot.message_handler(func=lambda m: m.text == "👤 Мой ключ")
 def my_key(message):
@@ -157,12 +188,13 @@ def my_key(message):
     c = conn.cursor()
     c.execute("SELECT vpn_uuid, email FROM users WHERE user_id = ?", (message.chat.id,))
     res = c.fetchone()
+    conn.close()
     
     if res and res[0]:
         link = generate_link(res[0], res[1])
         bot.send_message(message.chat.id, f"Твой ключ:\n`{link}`", parse_mode='Markdown')
     else:
-        bot.send_message(message.chat.id, "У тебя нет активной подписки.")
+        bot.send_message(message.chat.id, "Активной подписки не найдено.")
 
 if __name__ == "__main__":
     init_db()
