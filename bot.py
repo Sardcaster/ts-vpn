@@ -158,8 +158,10 @@ def check_handler(call):
             # 3. Сохраняем в БД
             conn = sqlite3.connect('shop.db')
             c = conn.cursor()
-            c.execute("UPDATE users SET vpn_uuid = ?, email = ? WHERE user_id = ?", 
-                      (new_uuid, email, call.from_user.id))
+            c.execute("""
+                INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, email) 
+                VALUES (?, ?, ?, ?)
+            """, (call.from_user.id, call.from_user.username, new_uuid, email))
             conn.commit()
             conn.close()
             
