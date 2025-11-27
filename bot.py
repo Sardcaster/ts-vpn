@@ -1,3 +1,4 @@
+import secrets
 import telebot
 from telebot import types
 import requests
@@ -52,7 +53,7 @@ def login_to_xui():
     except:
         pass
 
-def add_client(uuid_str, email, days=30):
+def add_client(uuid_str, sub_id_str, email, days=30):
     login_to_xui()
     # Вычисляем дату окончания (в миллисекундах)
     expire_time = int(time.time() * 1000) + (days * 24 * 60 * 60 * 1000)
@@ -61,6 +62,7 @@ def add_client(uuid_str, email, days=30):
         "clients": [
             {
                 "id": uuid_str,
+                "subId": sub_id_str,
                 "email": email,
                 "enable": True,
                 "flow": "xtls-rprx-vision",
@@ -79,7 +81,7 @@ def add_client(uuid_str, email, days=30):
         print(f"Ошибка X-UI: {e}")
         return False
 
-def generate_link(uuid_str, email):
+def generate_sub_link(sub_id_str):
     # Нам нужен порт панели. Обычно он есть в XUI_HOST (например http://127.0.0.1:2053)
     # Но для клиента нам нужен ВНЕШНИЙ IP.
     
@@ -89,21 +91,20 @@ def generate_link(uuid_str, email):
     
     # 2. Формируем ссылку-подписку
     # Формат: http://IP:PORT/sub/UUID
-    sub_link = f"http://{SERVER_IP}:{panel_port}/sub/{uuid_str}"
+    sub_link = f"http://{SERVER_IP}:{panel_port}/sub/{sub_id_str}"
     
     return sub_link
 
 
 # === ЮМАНИ ПЛАТЕЖИ ===
+# === ЮМАНИ ===
 def create_payment(user_id, price):
-    # Уникальная метка: vpn_ID_TIMESTAMP
     label = f"vpn_{user_id}_{int(time.time())}"
-    
     quickpay = Quickpay(
             receiver=YM_WALLET,
             quickpay_form="shop",
-            targets="VPN Подписка (1 месяц)",
-            paymentType="SB", # SB = Банковская карта / СБП
+            targets="VPN 1 месяц",
+            paymentType="SB", 
             sum=price,
             label=label
             )
@@ -112,37 +113,28 @@ def create_payment(user_id, price):
 def check_payment(label):
     try:
         client = Client(YM_TOKEN)
-        # Проверяем историю
         history = client.operation_history(label=label)
         for op in history.operations:
             if op.status == 'success':
                 return True
-    except Exception as e:
-        print(f"Ошибка проверки Юмани: {e}")
+    except: pass
     return False
 
-# === СИСТЕМА ОДНОГО ОКНА (UI HELPERS) ===
-
+# === UI HELPERS ===
 def clean_chat(chat_id, current_msg_id=None):
-    """Удаляет старое сообщение бота, если оно есть."""
     if chat_id in users_last_messages:
         last_id = users_last_messages[chat_id]
-        if current_msg_id and last_id == current_msg_id:
-            return
-        try:
-            bot.delete_message(chat_id, last_id)
+        if current_msg_id and last_id == current_msg_id: return
+        try: bot.delete_message(chat_id, last_id)
         except: pass
 
 def send_or_edit(chat_id, text, markup, message_id=None):
-    """Редактирует текущее сообщение или отправляет новое, сохраняя чистоту чата."""
     if message_id:
         try:
             bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='Markdown')
             users_last_messages[chat_id] = message_id
             return
-        except Exception:
-            pass # Если не вышло отредактировать, шлем новое
-    
+        except: pass
     clean_chat(chat_id)
     msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode='Markdown')
     users_last_messages[chat_id] = msg.message_id
@@ -186,7 +178,7 @@ def show_payment_method(chat_id, message_id):
 def show_profile(chat_id, message_id):
     conn = sqlite3.connect('shop.db')
     c = conn.cursor()
-    c.execute("SELECT vpn_uuid, email FROM users WHERE user_id = ?", (chat_id,))
+    c.execute("SELECT sub_id, email FROM users WHERE user_id = ?", (chat_id,))
     res = c.fetchone()
     conn.close()
 
@@ -195,7 +187,7 @@ def show_profile(chat_id, message_id):
 
     if res and res[0]:
         # Получаем теперь не vless://, а http://...
-        link = generate_link(res[0], res[1]) 
+        link = generate_sub_link(res[0], res[1]) 
         
         text = (
             f"👤 **Твой профиль**\n\n"
@@ -287,133 +279,91 @@ def show_platform_guide(chat_id, platform, message_id):
         send_or_edit(chat_id, data['text'], markup, message_id)
 
 # === ОБРАБОТЧИКИ (HANDLERS) ===
-
+# === HANDLERS ===
 @bot.message_handler(commands=['start'])
 def start(message):
     init_db()
     conn = sqlite3.connect('shop.db')
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", 
-              (message.chat.id, message.from_user.username))
+    # Здесь sub_id пока null, так как юзер еще не купил
+    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (message.chat.id, message.from_user.username))
     conn.commit()
     conn.close()
-
-    try:
-        bot.delete_message(message.chat.id, message.message_id)
+    try: bot.delete_message(message.chat.id, message.message_id)
     except: pass
-
     show_main_menu(message.chat.id)
 
-# ЕДИНЫЙ ЦЕНТР УПРАВЛЕНИЯ КНОПКАМИ
+@bot.message_handler(commands=['give'])
+def admin_give(message):
+    if message.chat.id != ADMIN_ID: return
+    try:
+        user_id = int(message.text.split()[1])
+        # Генерируем и UUID, и SUB_ID
+        new_uuid = str(uuid.uuid4())
+        new_sub_id = secrets.token_hex(8) # Генерируем случайную строку для подписки
+        email = f"tg_{user_id}"
+        
+        if add_client(new_uuid, new_sub_id, email):
+            conn = sqlite3.connect('shop.db')
+            c = conn.cursor()
+            c.execute("SELECT username FROM users WHERE user_id=?", (user_id,))
+            u = c.fetchone()
+            uname = u[0] if u else "Unknown"
+            
+            # Сохраняем sub_id тоже!
+            c.execute("INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, sub_id, email) VALUES (?, ?, ?, ?, ?)", 
+                      (user_id, uname, new_uuid, new_sub_id, email))
+            conn.commit()
+            conn.close()
+            
+            link = generate_sub_link(new_sub_id)
+            bot.send_message(user_id, f"🎉 **Подписка выдана!**\n🔗: `{link}`", parse_mode='Markdown')
+            bot.send_message(ADMIN_ID, f"✅ Выдано для {user_id}")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"Ошибка: {e}")
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     chat_id = call.message.chat.id
     msg_id = call.message.message_id
     data = call.data
 
-    # --- НАВИГАЦИЯ ---
-    if data == "goto_main":
-        show_main_menu(chat_id, msg_id)
+    if data == "goto_main": show_main_menu(chat_id, msg_id)
+    elif data == "goto_buy": show_payment_method(chat_id, msg_id)
+    elif data == "goto_profile": show_profile(chat_id, msg_id)
+    elif data == "goto_instructions": show_instructions_menu(chat_id, msg_id)
+    elif data.startswith("guide_"): show_platform_guide(chat_id, data.split("_")[1], msg_id)
     
-    elif data == "goto_buy":
-        show_payment_method(chat_id, msg_id)
-    
-    elif data == "goto_profile":
-        show_profile(chat_id, msg_id)
-        
-    elif data == "goto_instructions":
-        show_instructions_menu(chat_id, msg_id)
-        
-    elif data.startswith("guide_"):
-        platform = data.split("_")[1]
-        show_platform_guide(chat_id, platform, msg_id)
-
-    # --- ПРОВЕРКА ОПЛАТЫ ---
     elif data.startswith("check_"):
         label = data.split("_")[1]
-        
         if check_payment(label):
-            # УСПЕХ
+            # Генерируем данные
             new_uuid = str(uuid.uuid4())
+            new_sub_id = secrets.token_hex(8) # Пример: 'a1b2c3d4e5f6'
             email = f"tg_{call.from_user.id}"
             
-            if add_client(new_uuid, email, days=30):
-                # REPLACE гарантирует запись даже если юзер удалялся
+            if add_client(new_uuid, new_sub_id, email):
                 conn = sqlite3.connect('shop.db')
                 c = conn.cursor()
                 c.execute("""
-                    INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, email) 
-                    VALUES (?, ?, ?, ?)
-                """, (call.from_user.id, call.from_user.username, new_uuid, email))
+                    INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, sub_id, email) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, (call.from_user.id, call.from_user.username, new_uuid, new_sub_id, email))
                 conn.commit()
                 conn.close()
                 
-                link = generate_link(new_uuid, email)
-                
-                text = f"🎉 **Оплата прошла успешно!**\n\nТвой ключ готов:\n`{link}`"
+                link = generate_sub_link(new_sub_id)
+                text = f"🎉 **Оплата прошла!**\n\n🔗 **Ссылка-подписка:**\n`{link}`"
                 markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("👤 В профиль", callback_data="goto_profile"))
+                markup.add(types.InlineKeyboardButton("👤 Профиль", callback_data="goto_profile"))
                 markup.add(types.InlineKeyboardButton("📚 Как подключить", callback_data="goto_instructions"))
-                
                 send_or_edit(chat_id, text, markup, msg_id)
-                
-                try:
-                    bot.send_message(ADMIN_ID, f"💰 Продажа @{call.from_user.username}", parse_mode='HTML')
+                try: bot.send_message(ADMIN_ID, f"💰 Продажа {call.from_user.username}")
                 except: pass
             else:
-                bot.answer_callback_query(call.id, "Ошибка создания ключа! Свяжитесь с поддержкой.", show_alert=True)
+                bot.answer_callback_query(call.id, "Ошибка создания ключа.", show_alert=True)
         else:
-            # НЕУДАЧА (показываем алерт, окно не меняем)
-            bot.answer_callback_query(call.id, "❌ Оплата еще не пришла. Попробуйте через минуту.", show_alert=True)
-
-# === АДМИНСКАЯ КОМАНДА ВЫДАЧИ ===
-@bot.message_handler(commands=['give'])
-def admin_give(message):
-    # Проверяем, что пишет Админ
-    if message.chat.id != ADMIN_ID:
-        return
-
-    try:
-        # Берем ID из сообщения (пример: /give 123456789)
-        user_id_to_give = int(message.text.split()[1])
-    except:
-        bot.send_message(ADMIN_ID, "⚠️ Ошибка. Пиши так: `/give 123456789`", parse_mode='Markdown')
-        return
-
-    # Генерируем ключ
-    new_uuid = str(uuid.uuid4())
-    email = f"tg_{user_id_to_give}"
-    
-    # 1. Создаем в панели 3x-ui
-    if add_client(new_uuid, email, days=30):
-        # 2. Сохраняем в базу данных
-        conn = sqlite3.connect('shop.db')
-        c = conn.cursor()
-        # Пытаемся узнать username, если он был
-        c.execute("SELECT username FROM users WHERE user_id = ?", (user_id_to_give,))
-        row = c.fetchone()
-        u_name = row[0] if row else "Unknown"
-        
-        c.execute("""
-            INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, email) 
-            VALUES (?, ?, ?, ?)
-        """, (user_id_to_give, u_name, new_uuid, email))
-        conn.commit()
-        conn.close()
-        
-        # 3. Генерируем ссылку
-        link = generate_link(new_uuid, email)
-        
-        # 4. Отправляем пользователю
-        try:
-            bot.send_message(user_id_to_give, 
-                             f"🎉 **Подписка активирована администратором!**\n\n🔗 Твоя подписка:\n`{link}`", 
-                             parse_mode='Markdown')
-            bot.send_message(ADMIN_ID, f"✅ Успешно выдал подписку для `{user_id_to_give}`")
-        except:
-            bot.send_message(ADMIN_ID, f"✅ Ключ создан, но лс закрыто. Вот ссылка:\n`{link}`")
-    else:
-        bot.send_message(ADMIN_ID, "❌ Ошибка 3x-ui: не удалось создать клиента.")
+            bot.answer_callback_query(call.id, "❌ Оплата не найдена.", show_alert=True)
 
 if __name__ == "__main__":
     init_db()
