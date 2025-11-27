@@ -20,6 +20,7 @@ XUI_USERNAME = os.getenv('XUI_USERNAME')
 XUI_PASSWORD = os.getenv('XUI_PASSWORD')
 INBOUND_ID = int(os.getenv('INBOUND_ID'))
 SERVER_IP = os.getenv('SERVER_IP')
+SERVER_HOSTNAME = os.getenv('SERVER_HOSTNAME')
 VLESS_PORT = os.getenv('VLESS_PORT')
 
 YM_TOKEN = os.getenv('YOOMONEY_TOKEN')
@@ -92,7 +93,7 @@ def generate_sub_link(sub_id_str):
     
     # 2. Формируем ссылку-подписку
     # Формат: http://IP:PORT/sub/UUID
-    sub_link = f"http://{SERVER_IP}:{panel_port}/sub/{sub_id_str}"
+    sub_link = f"http://{SERVER_HOSTNAME}:{panel_port}/sub/{sub_id_str}"
     
     return sub_link
 
