@@ -24,7 +24,11 @@ VLESS_PORT = os.getenv('VLESS_PORT')
 YM_TOKEN = os.getenv('YOOMONEY_TOKEN')
 YM_WALLET = os.getenv('YOOMONEY_WALLET')
 
+# ... инициализация бота ...
 bot = telebot.TeleBot(BOT_TOKEN)
+# Словарь для запоминания последнего сообщения бота
+# Структура: {user_id: message_id}
+last_bot_messages = {}
 session = requests.Session()
 
 # === БАЗА ДАННЫХ ===
@@ -107,6 +111,17 @@ def check_payment(label):
         print(f"Ошибка проверки Юмани: {e}")
     return False
 
+def delete_last_message(chat_id):
+    """Удаляет последнее сообщение бота в этом чате, если оно записано"""
+    if chat_id in last_bot_messages:
+        msg_id = last_bot_messages[chat_id]
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass # Если сообщение уже удалено или не найдено - не страшно
+        # Убираем из памяти
+        del last_bot_messages[chat_id]
+
 # === ЛОГИКА БОТА ===
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -123,30 +138,45 @@ def start(message):
     
     bot.send_message(message.chat.id, "Привет! Это TS VPN 🚀\nЖми кнопку ниже.", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text == "🛒 Купить подписку (100р)")
+@bot.message_handler(func=lambda m: m.text == "🛒 Купить подписку (100р)") # Или какой у тебя текст
 def buy(message):
-    price = 100 # Цена в рублях
-    # 1. Создаем ссылку
-    pay_url, label = create_payment(message.chat.id, price)
+    # 1. Сначала удаляем старое сообщение (то самое, что дублируется на скрине)
+    delete_last_message(message.chat.id)
+
+    price = 100
+    pay_url, label = create_payment(message.chat.id, price) # (Твоя функция создания ссылки)
     
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("💳 Оплатить картой (или СБП)", url=pay_url))
-    # В кнопку проверки зашиваем метку (label)
     markup.add(types.InlineKeyboardButton("🔄 Я оплатил", callback_data=f"check_{label}"))
     
-    bot.send_message(message.chat.id, 
-                     f"Счет создан!\nЦена: {price} руб.\n\nНажми кнопку, оплати картой (или СБП), затем нажми 'Я оплатил'.", 
+    # 2. Отправляем новое сообщение и СОХРАНЯЕМ его в переменную msg
+    msg = bot.send_message(message.chat.id, 
+                     f"Счет создан!\nЦена: {price} руб.\n\nНажми кнопку...", 
                      reply_markup=markup)
+    
+    # 3. Запоминаем ID этого сообщения в словарь
+    last_bot_messages[message.chat.id] = msg.message_id
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
 def check_handler(call):
     label = call.data.split("_")[1]
     
+    # Сразу убираем "часики" загрузки
     bot.answer_callback_query(call.id, "Проверяю оплату...")
     
     if check_payment(label):
-        # === ОПЛАТА УСПЕШНА ===
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+        # === ЕСЛИ ОПЛАТА ЕСТЬ ===
+        
+        # 1. Удаляем сообщение с кнопкой "Оплатить" (чтобы на неё больше не жали)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        
+        # 2. Если это сообщение было в памяти last_bot_messages, убираем его оттуда
+        if call.message.chat.id in last_bot_messages:
+             del last_bot_messages[call.message.chat.id]
+
         bot.send_message(call.message.chat.id, "✅ Оплата получена! Настраиваю сервер...")
         
         # 1. Данные для ключа
@@ -182,7 +212,7 @@ def check_handler(call):
             
     else:
         # === ОПЛАТА НЕ НАЙДЕНА ===
-        bot.send_message(call.message.chat.id, "❌ Платеж пока не видим. Если оплатили только что - подождите минуту и нажмите кнопку снова.")
+        bot.answer_callback_query(call.id, "❌ Платеж пока не видим. Если оплатили только что - подождите минуту и нажмите кнопку снова.", show_alert=True)
 
 @bot.message_handler(func=lambda m: m.text == "👤 Мой ключ")
 def my_key(message):
