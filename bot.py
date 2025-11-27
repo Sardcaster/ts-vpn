@@ -112,15 +112,22 @@ def manual_pay(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_"))
 def user_confirmed(call):
+    # Уведомляем пользователя
     bot.edit_message_text("⏳ Заявка отправлена админу...", call.message.chat.id, call.message.message_id)
     
     # Кнопка для админа
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ Выдать доступ", callback_data=f"admin_yes_{call.from_user.id}"))
     
+    # === ИСПРАВЛЕНИЕ НИЖЕ ===
+    # Используем HTML, чтобы ники с символом "_" не ломали бота
+    # И добавим проверку, если у юзера нет никнейма
+    username = call.from_user.username if call.from_user.username else "Без никнейма"
+    
     bot.send_message(ADMIN_ID, 
-                     f"💰 **Новая оплата!**\nОт: @{call.from_user.username}", 
-                     reply_markup=markup, parse_mode='Markdown')
+                     f"💰 <b>Новая оплата!</b>\nОт: @{username}", 
+                     reply_markup=markup, 
+                     parse_mode='HTML') # <--- Заменили Markdown на HTML
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_yes_"))
 def admin_approve(call):
