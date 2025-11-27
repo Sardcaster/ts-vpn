@@ -366,6 +366,55 @@ def handle_query(call):
             # НЕУДАЧА (показываем алерт, окно не меняем)
             bot.answer_callback_query(call.id, "❌ Оплата еще не пришла. Попробуйте через минуту.", show_alert=True)
 
+# === АДМИНСКАЯ КОМАНДА ВЫДАЧИ ===
+@bot.message_handler(commands=['give'])
+def admin_give(message):
+    # Проверяем, что пишет Админ
+    if message.chat.id != ADMIN_ID:
+        return
+
+    try:
+        # Берем ID из сообщения (пример: /give 123456789)
+        user_id_to_give = int(message.text.split()[1])
+    except:
+        bot.send_message(ADMIN_ID, "⚠️ Ошибка. Пиши так: `/give 123456789`", parse_mode='Markdown')
+        return
+
+    # Генерируем ключ
+    new_uuid = str(uuid.uuid4())
+    email = f"tg_{user_id_to_give}"
+    
+    # 1. Создаем в панели 3x-ui
+    if add_client(new_uuid, email, days=30):
+        # 2. Сохраняем в базу данных
+        conn = sqlite3.connect('shop.db')
+        c = conn.cursor()
+        # Пытаемся узнать username, если он был
+        c.execute("SELECT username FROM users WHERE user_id = ?", (user_id_to_give,))
+        row = c.fetchone()
+        u_name = row[0] if row else "Unknown"
+        
+        c.execute("""
+            INSERT OR REPLACE INTO users (user_id, username, vpn_uuid, email) 
+            VALUES (?, ?, ?, ?)
+        """, (user_id_to_give, u_name, new_uuid, email))
+        conn.commit()
+        conn.close()
+        
+        # 3. Генерируем ссылку
+        link = generate_link(new_uuid, email)
+        
+        # 4. Отправляем пользователю
+        try:
+            bot.send_message(user_id_to_give, 
+                             f"🎉 **Подписка активирована администратором!**\n\n🔗 Твоя подписка:\n`{link}`", 
+                             parse_mode='Markdown')
+            bot.send_message(ADMIN_ID, f"✅ Успешно выдал подписку для `{user_id_to_give}`")
+        except:
+            bot.send_message(ADMIN_ID, f"✅ Ключ создан, но лс закрыто. Вот ссылка:\n`{link}`")
+    else:
+        bot.send_message(ADMIN_ID, "❌ Ошибка 3x-ui: не удалось создать клиента.")
+
 if __name__ == "__main__":
     init_db()
     print("Бот запущен...")
